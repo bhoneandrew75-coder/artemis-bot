@@ -114,64 +114,96 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🧠 ADVANCED SCRAPER (unchanged)
 # ----------------------------
 async def get_artemis_data() -> Dict[str, str]:
-    """Robust scraper with comprehensive error handling and retry logic."""
+    """Enhanced scraper with better waiting and debugging."""
     max_retries = 3
     
     for attempt in range(max_retries):
         try:
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu"
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--disable-web-security"
                     ]
                 )
                 
                 context = await browser.new_context(
                     viewport={'width': 1920, 'height': 1080},
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
                 )
                 page = await context.new_page()
                 
                 logger.info(f"🌐 Fetching data (attempt {attempt + 1}/{max_retries})...")
                 
-                await page.goto(ARTEMIS_URL, timeout=60000)
-                await page.wait_for_timeout(8000)
+                await page.goto(ARTEMIS_URL, timeout=60000, wait_until='networkidle')
                 
+                # Wait longer for dynamic content
+                await page.wait_for_timeout(15000)  # 15 seconds
+                
+                # Debug: Save page content for inspection
                 text = await page.inner_text("body")
-                logger.info("✅ Page content loaded successfully")
+                logger.info(f"📄 Page length: {len(text)} chars")
+                
+                # Log first 500 chars for debugging
+                logger.info(f"🔍 Page preview: {text[:500]}...")
                 
                 await browser.close()
                 
                 data = await _parse_data(text)
+                
+                # Log parsed results
+                logger.info(f"✅ Parsed data: {list(data.keys())}")
                 return data
                 
         except Exception as e:
             logger.error(f"❌ Attempt {attempt + 1} failed: {str(e)}")
             if attempt < max_retries - 1:
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(3 ** attempt)  # Exponential backoff
             else:
                 logger.error("💥 All retry attempts failed")
     
     return {key: "❌ Unavailable" for key in DATA_CONFIG.keys()}
 
 async def _parse_data(text: str) -> Dict[str, str]:
-    """Advanced multi-line regex parser with validation."""
+    """🔥 BULLETPROOF parser - extracts EXACT values after each label"""
     results = {}
     
+    # More precise patterns - look for exact label + immediate value
+    patterns = {
+        "SPACECRAFT VELOCITY": r"SPACECRAFT VELOCITY.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*([A-Zkm/s]+)",
+        "DISTANCE FROM EARTH": r"DISTANCE FROM EARTH.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*([A-ZKM]+)",
+        "DISTANCE FROM MOON": r"DISTANCE FROM MOON.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*([A-ZKM]+)",
+        "ALTITUDE ABOVE EARTH": r"ALTITUDE ABOVE EARTH.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*([A-ZKM]+)",
+        "CABIN TEMP": r"CABIN TEMP.*?(-?\d+(?:\.\d+)?)\s*([°CF]+)",
+        "HEATSHIELD": r"HEATSHIELD.*?(\d+(?:\.\d+)?)\s*([°CF]+)",
+        "SIGNAL DELAY": r"SIGNAL DELAY.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*(SECONDS?)",
+        "MISSION PROGRESS": r"MISSION PROGRESS.*?(\d+(?:\.\d+)?)\s*(%)"
+    }
+    
     for label_raw, (emoji, display_name) in DATA_CONFIG.items():
-        pattern = rf"{re.escape(label_raw)}[\s\S]*?([\d,]+\.?\d*)[\s]*([A-Za-z/%°]+)?"
-        match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+        pattern = patterns.get(label_raw, rf"{re.escape(label_raw)}[\s\S]*?([\d,]+\.?\d*)[\s]*([A-Za-z/%°]+)")
+        
+        # Search with multiple strategies
+        match = (re.search(pattern, text, re.IGNORECASE | re.DOTALL) or 
+                re.search(rf"{re.escape(label_raw)}.*?(\d+(?:,\d+)*(?:\.\d+)?)\s*([A-Za-z/%°km/s]+)", text, re.IGNORECASE | re.DOTALL) or
+                re.search(rf"{re.escape(label_raw)}.*?(\d+(?:,\d+)*)\s*([A-Za-z/%°]+)", text, re.IGNORECASE | re.DOTALL))
         
         if match:
             value = match.group(1).replace(",", "")
-            unit = match.group(2) if match.group(2) else ""
+            unit = match.group(2).strip() if match.group(2) else ""
+            
+            # Clean up units
+            unit = unit.replace("°C", "°C").replace("°F", "°F").replace("KM", "km").replace("SECONDS", "s")
+            
             results[label_raw] = f"{emoji} `{value} {unit}`".strip()
+            logger.info(f"✅ Parsed {label_raw}: {value} {unit}")
         else:
             results[label_raw] = f"{emoji} `❌ Not found`"
+            logger.warning(f"❌ Could not parse {label_raw}")
     
     return results
 
