@@ -142,7 +142,8 @@ async def get_artemis_data() -> Dict[str, str]:
                 await page.goto(ARTEMIS_URL, timeout=60000, wait_until='networkidle')
                 
                 # Wait longer for dynamic content
-                await page.wait_for_timeout(15000)  # 15 seconds
+                await page.wait_for_load_state("networkidle")
+                await page.wait_for_timeout(5000)  # 15 seconds
                 
                 # Debug: Save page content for inspection
                 text = await page.inner_text("body")
@@ -169,42 +170,34 @@ async def get_artemis_data() -> Dict[str, str]:
     return {key: "❌ Unavailable" for key in DATA_CONFIG.keys()}
 
 async def _parse_data(text: str) -> Dict[str, str]:
-    """🔥 BULLETPROOF parser - extracts EXACT values after each label"""
     results = {}
-    
-    # More precise patterns - look for exact label + immediate value
-    patterns = {
-        "SPACECRAFT VELOCITY": r"SPACECRAFT VELOCITY.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*([A-Zkm/s]+)",
-        "DISTANCE FROM EARTH": r"DISTANCE FROM EARTH.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*([A-ZKM]+)",
-        "DISTANCE FROM MOON": r"DISTANCE FROM MOON.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*([A-ZKM]+)",
-        "ALTITUDE ABOVE EARTH": r"ALTITUDE ABOVE EARTH.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*([A-ZKM]+)",
-        "CABIN TEMP": r"CABIN TEMP.*?(-?\d+(?:\.\d+)?)\s*([°CF]+)",
-        "HEATSHIELD": r"HEATSHIELD.*?(\d+(?:\.\d+)?)\s*([°CF]+)",
-        "SIGNAL DELAY": r"SIGNAL DELAY.*?(\d+(?:,\d+)?(?:\.\d+)?)\s*(SECONDS?)",
-        "MISSION PROGRESS": r"MISSION PROGRESS.*?(\d+(?:\.\d+)?)\s*(%)"
+
+    flexible_patterns = {
+        "SPACECRAFT VELOCITY": r"(velocity|speed)[^\d]*([\d,.]+)\s*([a-zA-Z/]+)",
+        "DISTANCE FROM EARTH": r"(distance from earth)[^\d]*([\d,.]+)\s*(km|mi)",
+        "DISTANCE FROM MOON": r"(distance from moon)[^\d]*([\d,.]+)\s*(km|mi)",
+        "ALTITUDE ABOVE EARTH": r"(altitude)[^\d]*([\d,.]+)\s*(km)",
+        "CABIN TEMP": r"(cabin temp)[^\d]*(-?[\d.]+)\s*(°c|c)",
+        "HEATSHIELD": r"(heatshield)[^\d]*([\d.]+)\s*(°c|c)",
+        "SIGNAL DELAY": r"(signal delay)[^\d]*([\d.]+)\s*(seconds|s)",
+        "MISSION PROGRESS": r"(mission progress)[^\d]*([\d.]+)\s*(%)"
     }
-    
-    for label_raw, (emoji, display_name) in DATA_CONFIG.items():
-        pattern = patterns.get(label_raw, rf"{re.escape(label_raw)}[\s\S]*?([\d,]+\.?\d*)[\s]*([A-Za-z/%°]+)")
-        
-        # Search with multiple strategies
-        match = (re.search(pattern, text, re.IGNORECASE | re.DOTALL) or 
-                re.search(rf"{re.escape(label_raw)}.*?(\d+(?:,\d+)*(?:\.\d+)?)\s*([A-Za-z/%°km/s]+)", text, re.IGNORECASE | re.DOTALL) or
-                re.search(rf"{re.escape(label_raw)}.*?(\d+(?:,\d+)*)\s*([A-Za-z/%°]+)", text, re.IGNORECASE | re.DOTALL))
-        
-        if match:
-            value = match.group(1).replace(",", "")
-            unit = match.group(2).strip() if match.group(2) else ""
-            
-            # Clean up units
-            unit = unit.replace("°C", "°C").replace("°F", "°F").replace("KM", "km").replace("SECONDS", "s")
-            
-            results[label_raw] = f"{emoji} `{value} {unit}`".strip()
-            logger.info(f"✅ Parsed {label_raw}: {value} {unit}")
+
+    for key, (emoji, _) in DATA_CONFIG.items():
+        pattern = flexible_patterns.get(key)
+
+        if pattern:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                value = match.group(2).replace(",", "")
+                unit = match.group(3)
+                results[key] = f"{emoji} `{value} {unit}`"
+            else:
+                results[key] = f"{emoji} `❌ Not found`"
+                logger.warning(f"❌ Failed: {key}")
         else:
-            results[label_raw] = f"{emoji} `❌ Not found`"
-            logger.warning(f"❌ Could not parse {label_raw}")
-    
+            results[key] = f"{emoji} `❌ Not found`"
+
     return results
 
 # ----------------------------
